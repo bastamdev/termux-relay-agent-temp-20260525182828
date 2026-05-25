@@ -1116,6 +1116,48 @@ def is_duplicate_account_error(message: str) -> bool:
     return any(token in normalized for token in tokens)
 
 
+def _normalize_probe_timeout(value: Any, *, default: float = 15.0) -> float:
+    try:
+        timeout_seconds = float(value)
+    except (TypeError, ValueError):
+        timeout_seconds = default
+    return min(max(timeout_seconds, 1.0), 60.0)
+
+
+async def probe_url(payload: dict[str, Any]) -> dict[str, Any]:
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        raise RelayError("url is required for relay url probe")
+
+    method = str(payload.get("method") or "GET").strip().upper()
+    timeout_seconds = _normalize_probe_timeout(payload.get("timeout_seconds"))
+    follow_redirects = bool(payload.get("follow_redirects", True))
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout_seconds),
+        follow_redirects=follow_redirects,
+        trust_env=False,
+    ) as client:
+        response = await client.request(method, url)
+
+    return {
+        "ok": True,
+        "url": url,
+        "method": method,
+        "status_code": response.status_code,
+        "reason_phrase": response.reason_phrase,
+        "final_url": str(response.url),
+        "elapsed_ms": int(response.elapsed.total_seconds() * 1000),
+        "headers": {
+            "server": response.headers.get("server"),
+            "content_type": response.headers.get("content-type"),
+            "content_length": response.headers.get("content-length"),
+            "location": response.headers.get("location"),
+        },
+        "body_preview": response.text[:500],
+    }
+
+
 async def execute_job(job: dict[str, Any], *, connect_timeout: float, request_timeout: float) -> dict[str, Any]:
     operation = str(job["operation"]).strip().lower()
     panel = job["panel"]
@@ -1127,6 +1169,8 @@ async def execute_job(job: dict[str, Any], *, connect_timeout: float, request_ti
             "nonce": str(payload.get("nonce") or ""),
             "runtime": "termux-standalone",
         }
+    if operation == "url_probe":
+        return await probe_url(payload)
     client = build_client(panel, connect_timeout=connect_timeout, request_timeout=request_timeout)
     if operation == "test_connection":
         await client.test_connection()
