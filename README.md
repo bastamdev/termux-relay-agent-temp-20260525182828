@@ -12,7 +12,7 @@
 
 ```bash
 pkg update
-pkg install python git
+pkg install python git python-cryptography
 git clone <TEMP_REPO_URL> termux-relay-agent
 cd termux-relay-agent
 pip install -r requirements.txt
