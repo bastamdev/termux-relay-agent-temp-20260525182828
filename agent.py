@@ -1120,6 +1120,13 @@ async def execute_job(job: dict[str, Any], *, connect_timeout: float, request_ti
     operation = str(job["operation"]).strip().lower()
     panel = job["panel"]
     payload = job["request_payload"]
+    if operation == "ping":
+        return {
+            "ok": True,
+            "agent_name": str(payload.get("agent_name") or ""),
+            "nonce": str(payload.get("nonce") or ""),
+            "runtime": "termux-standalone",
+        }
     client = build_client(panel, connect_timeout=connect_timeout, request_timeout=request_timeout)
     if operation == "test_connection":
         await client.test_connection()
