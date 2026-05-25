@@ -1043,6 +1043,56 @@ class XUIClient(BaseVPNClient):
         config_copy_text = "\n".join(config_links) if config_links else None
         return primary_link, config_copy_text
 
+    async def _create_account_legacy(self, username: str, traffic_limit_bytes: int, expire_timestamp: int | None) -> ProvisionResult:
+        inbound = await self._get_inbound()
+        protocol = str(inbound.get("protocol") or "").strip().lower()
+        client = self._build_client_payload(protocol, username, traffic_limit_bytes, expire_timestamp, inbound=inbound)
+        payload = {
+            "id": int(inbound.get("id") or 0),
+            "settings": json.dumps({"clients": [client]}, ensure_ascii=False, separators=(",", ":")),
+        }
+        await self._api_request("POST", "/panel/api/inbounds/addClient", payload)
+        sub_id = str(client.get("subId") or "").strip()
+        config_links = await self._get_sub_links(sub_id)
+        primary_link, config_copy_text = await self._resolve_config_material(config_links, sub_id)
+        if not primary_link:
+            raise RelayError("لینک اشتراک برای کاربر ساخته شد اما از پنل 3X-UI قابل دریافت نبود")
+        return ProvisionResult(username=username, config_link=primary_link, config_copy_text=config_copy_text)
+
+    async def _renew_account_legacy(self, username: str, traffic_limit_bytes: int, expire_timestamp: int | None) -> ProvisionResult:
+        payload = await self._api_request("GET", f"/panel/api/inbounds/getClientTraffics/{quote(username, safe='')}")
+        usage = payload if isinstance(payload, dict) else {}
+        inbound_id = int(usage.get("inboundId") or self.extra_config.get("inbound_id") or 0)
+        inbound = await self._get_inbound(inbound_id or None)
+        existing_client = self._find_client(inbound, username)
+        if existing_client is None:
+            raise RelayError(f"کاربر {username} در inbound انتخاب شده XUI پیدا نشد")
+
+        protocol = str(inbound.get("protocol") or "").strip().lower()
+        updated_client = self._build_client_payload(
+            protocol,
+            username,
+            traffic_limit_bytes,
+            expire_timestamp,
+            existing_client=existing_client,
+            inbound=inbound,
+        )
+        client_id = self._client_primary_key(protocol, updated_client)
+        if not client_id:
+            raise RelayError("شناسه کلاینت XUI برای تمدید پیدا نشد")
+
+        update_payload = {
+            "id": int(inbound.get("id") or 0),
+            "settings": json.dumps({"clients": [updated_client]}, ensure_ascii=False, separators=(",", ":")),
+        }
+        await self._api_request("POST", f"/panel/api/inbounds/updateClient/{quote(client_id, safe='')}", update_payload)
+        sub_id = str(updated_client.get("subId") or "").strip()
+        config_links = await self._get_sub_links(sub_id)
+        primary_link, config_copy_text = await self._resolve_config_material(config_links, sub_id)
+        if not primary_link:
+            raise RelayError("لینک اشتراک کاربر پس از تمدید از پنل 3X-UI قابل دریافت نبود")
+        return ProvisionResult(username=username, config_link=primary_link, config_copy_text=config_copy_text)
+
     async def test_connection(self) -> None:
         await self._resolve_api_prefix()
         await self._get_inbound()
@@ -1054,7 +1104,12 @@ class XUIClient(BaseVPNClient):
         inbound_id = int(inbound.get("id") or 0)
         if inbound_id <= 0:
             raise RelayError("شناسه inbound برای ساخت کاربر در 3X-UI معتبر نیست")
-        await self._api_request("POST", "/panel/api/clients/add", {"client": client, "inboundIds": [inbound_id]})
+        try:
+            await self._api_request("POST", "/panel/api/clients/add", {"client": client, "inboundIds": [inbound_id]})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            return await self._create_account_legacy(username, traffic_limit_bytes, expire_timestamp)
         created_client, _ = await self._get_client_record(username)
         sub_id = str(created_client.get("subId") or client.get("subId") or "").strip()
         config_links = await self._get_client_links(username, sub_id=sub_id)
@@ -1073,7 +1128,12 @@ class XUIClient(BaseVPNClient):
         return payload if isinstance(payload, dict) else {}
 
     async def renew_account(self, username: str, traffic_limit_bytes: int, expire_timestamp: int | None) -> ProvisionResult:
-        existing_client, inbound_ids = await self._get_client_record(username)
+        try:
+            existing_client, inbound_ids = await self._get_client_record(username)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            return await self._renew_account_legacy(username, traffic_limit_bytes, expire_timestamp)
         preferred_inbound_id = self.extra_config.get("inbound_id")
         target_inbound_id = int(preferred_inbound_id) if preferred_inbound_id is not None else (inbound_ids[0] if inbound_ids else 0)
         inbound = await self._get_inbound(target_inbound_id or None)
